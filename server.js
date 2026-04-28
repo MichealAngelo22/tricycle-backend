@@ -16,18 +16,6 @@ admin.initializeApp({
   }),
 });
 
-// Debug credentials
-console.log("Firebase Project:", serviceAccount.project_id);
-console.log("Service Account Email:", serviceAccount.client_email);
-console.log("Private Key Length:", serviceAccount.private_key?.length);
-
-// Initialize Firebase
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
-}
-
 const db = admin.firestore();
 
 app.use(cors());
