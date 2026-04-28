@@ -8,8 +8,13 @@ const path = require("path");
 const app = express();
 const admin = require("firebase-admin");
 
-// Load service account
-const serviceAccount = require(path.resolve(__dirname, "serviceAccountKey.json"));
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+  }),
+});
 
 // Debug credentials
 console.log("Firebase Project:", serviceAccount.project_id);
