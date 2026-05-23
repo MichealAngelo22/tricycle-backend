@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 
 const app = express();
 const admin = require("firebase-admin");
@@ -17,23 +17,9 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// ── Email transporter ─────────────────────────────────────────
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_APP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false,
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 15000,
-  family: 4,
-});
+// ── Resend client (HTTP-based — works on Render free tier) ────
+const resend = new Resend(process.env.RESEND_API_KEY);
+
 app.use(cors());
 app.use(express.json());
 
@@ -44,9 +30,7 @@ app.post("/initialize-payment", async (req, res) => {
   const { email, amount, type, rideId } = req.body;
 
   if (!email || !amount) {
-    return res.status(400).json({
-      error: "Email and amount are required",
-    });
+    return res.status(400).json({ error: "Email and amount are required" });
   }
 
   try {
@@ -75,9 +59,7 @@ app.post("/initialize-payment", async (req, res) => {
     res.json(response.data);
   } catch (error) {
     console.error("Init Payment Error:", error.response?.data || error.message);
-    res.status(500).json({
-      error: "Payment initialization failed",
-    });
+    res.status(500).json({ error: "Payment initialization failed" });
   }
 });
 
@@ -88,28 +70,18 @@ app.get("/verify-payment", async (req, res) => {
   const { reference } = req.query;
 
   if (!reference) {
-    return res.status(400).json({
-      status: false,
-      message: "No reference provided",
-    });
+    return res.status(400).json({ status: false, message: "No reference provided" });
   }
 
   try {
     const response = await axios.get(
       `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET}`,
-        },
-      }
+      { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET}` } }
     );
 
     const paystackData = response.data;
 
-    if (
-      paystackData.status === true &&
-      paystackData.data.status === "success"
-    ) {
+    if (paystackData.status === true && paystackData.data.status === "success") {
       return res.json({
         status: true,
         message: "Payment verified successfully",
@@ -124,10 +96,7 @@ app.get("/verify-payment", async (req, res) => {
     }
   } catch (error) {
     console.error("Verify Error:", error.response?.data || error.message);
-    return res.status(500).json({
-      status: false,
-      message: "Verification failed",
-    });
+    return res.status(500).json({ status: false, message: "Verification failed" });
   }
 });
 
@@ -191,7 +160,6 @@ async function recordDriverEarning({
 ===================== */
 app.post("/paystack-webhook", async (req, res) => {
   const event = req.body;
-
   console.log("FULL EVENT:", JSON.stringify(event, null, 2));
 
   try {
@@ -286,7 +254,7 @@ app.post("/send-sos-email", async (req, res) => {
 
     const subject = "🚨 SOS Emergency Alert";
 
-    const buildBody = (recipientName) => {
+    const buildText = (recipientName) => {
       const location = mapsLink
         ? `View live location: ${mapsLink}`
         : "Location unavailable";
@@ -299,6 +267,27 @@ app.post("/send-sos-email", async (req, res) => {
       );
     };
 
+    const buildHtml = (recipientName) => {
+      const location = mapsLink
+        ? `<a href="${mapsLink}" style="color:#c0392b;">📍 View live location on Google Maps</a>`
+        : "<span>📍 Location unavailable</span>";
+      const plateInfo = driverPlate
+        ? `<p style="margin:0 0 8px;"><strong>🛺 Tricycle plate:</strong> ${driverPlate}</p>`
+        : "";
+      return `
+        <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;border:1px solid #f5c6cb;border-radius:12px;background:#fff8f8;">
+          <h2 style="color:#c0392b;margin-top:0;">🚨 SOS Emergency Alert</h2>
+          <p style="margin:0 0 8px;">Hi <strong>${recipientName}</strong>,</p>
+          <p style="margin:0 0 16px;color:#333;">A passenger using <strong>SafeRide</strong> needs <strong>immediate help</strong>.</p>
+          ${plateInfo}
+          <p style="margin:0 0 16px;">${location}</p>
+          <p style="margin:0;color:#555;">Please call emergency services (<strong>191</strong>) or check on them immediately.</p>
+          <hr style="margin:24px 0;border:none;border-top:1px solid #f5c6cb;" />
+          <p style="font-size:12px;color:#999;margin:0;">Sent automatically by SafeRide Safety System.</p>
+        </div>
+      `;
+    };
+
     // All recipients: emergency contacts + support
     const recipients = [
       ...contacts
@@ -307,32 +296,36 @@ app.post("/send-sos-email", async (req, res) => {
       { name: "Support Team", email: "michealcraft022@gmail.com" },
     ];
 
-    // Send all emails in parallel
+    // Send all emails, log individual failures without stopping others
+    let sentCount = 0;
     for (const r of recipients) {
-  try {
-    await transporter.sendMail({
-      from: `"SafeRide SOS" <${process.env.EMAIL_USER}>`,
-      to: r.email,
-      subject,
-      text: buildBody(r.name),
-    });
+      try {
+        await resend.emails.send({
+          from: "SafeRide SOS <onboarding@resend.dev>", // ← use resend.dev until you add a domain
+          to: r.email,
+          subject,
+          text: buildText(r.name),
+          html: buildHtml(r.name),
+        });
+        console.log(`📩 SOS email sent to: ${r.email}`);
+        sentCount++;
+      } catch (err) {
+        console.error(`❌ Failed to send to ${r.email}:`, err.message);
+      }
+    }
 
-    console.log(`📩 Email sent to: ${r.email}`);
-  } catch (err) {
-    console.log(`❌ Failed email: ${r.email}`, err.message);
-  }
-}
-
-    // Update alert to record that emails were sent
-    await db.collection("sos_alerts").doc(alertId).set({
-      emails_sent: true,
-      emails_sent_at: admin.firestore.FieldValue.serverTimestamp(),
-      notified_count: recipients.length,
-    }, { merge: true });
-    console.log(
-      `✅ SOS emails sent for alert ${alertId} to ${recipients.length} recipients`
+    // Update alert in Firestore
+    await db.collection("sos_alerts").doc(alertId).set(
+      {
+        emails_sent: true,
+        emails_sent_at: admin.firestore.FieldValue.serverTimestamp(),
+        notified_count: sentCount,
+      },
+      { merge: true }
     );
-    res.json({ success: true, sent_to: recipients.length });
+
+    console.log(`✅ SOS done — sent ${sentCount}/${recipients.length} emails for alert ${alertId}`);
+    res.json({ success: true, sent_to: sentCount, total: recipients.length });
   } catch (error) {
     console.error("SOS email error:", error.message || error);
     res.status(500).json({ error: "Failed to send SOS emails" });
@@ -353,9 +346,9 @@ app.get("/test-firestore", async (req, res) => {
 });
 
 console.log("PAYSTACK KEY LOADED:", !!process.env.PAYSTACK_SECRET);
+console.log("RESEND KEY LOADED:", !!process.env.RESEND_API_KEY);
 
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
