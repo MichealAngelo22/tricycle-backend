@@ -243,6 +243,7 @@ app.post("/send-sos-email", async (req, res) => {
   }
 
   try {
+    console.log("SOS userId received:", userId);
     // Load emergency contacts from Firestore
     const contactsSnap = await db
       .collection("users")
@@ -251,6 +252,7 @@ app.post("/send-sos-email", async (req, res) => {
       .get();
 
     const contacts = contactsSnap.docs.map((d) => d.data());
+    console.log("Contacts found:", contacts.length, contacts);
 
     const subject = "🚨 SOS Emergency Alert";
 
