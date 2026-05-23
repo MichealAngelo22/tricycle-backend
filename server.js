@@ -20,15 +20,15 @@ const db = admin.firestore();
 // ── Email transporter ─────────────────────────────────────────
 const transporter = nodemailer.createTransport({
   service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_APP_PASS,
   },
-  tls: {
-    rejectUnauthorized: false,
-  },
+  family: 4, // 🔥 FORCES IPv4 (fixes ENETUNREACH)
 });
-
 app.use(cors());
 app.use(express.json());
 
@@ -319,12 +319,11 @@ app.post("/send-sos-email", async (req, res) => {
 }
 
     // Update alert to record that emails were sent
-    await db.collection("sos_alerts").doc(alertId).update({
+    await db.collection("sos_alerts").doc(alertId).set({
       emails_sent: true,
       emails_sent_at: admin.firestore.FieldValue.serverTimestamp(),
       notified_count: recipients.length,
-    });
-
+    }, { merge: true });
     console.log(
       `✅ SOS emails sent for alert ${alertId} to ${recipients.length} recipients`
     );
