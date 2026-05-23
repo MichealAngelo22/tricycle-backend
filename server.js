@@ -19,7 +19,6 @@ const db = admin.firestore();
 
 // ── Email transporter ─────────────────────────────────────────
 const transporter = nodemailer.createTransport({
-  service: "gmail",
   host: "smtp.gmail.com",
   port: 465,
   secure: true,
@@ -27,7 +26,13 @@ const transporter = nodemailer.createTransport({
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_APP_PASS,
   },
-  family: 4, // 🔥 FORCES IPv4 (fixes ENETUNREACH)
+  tls: {
+    rejectUnauthorized: false,
+  },
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 15000,
+  family: 4,
 });
 app.use(cors());
 app.use(express.json());
