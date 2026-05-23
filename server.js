@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
-const path = require("path");
+const nodemailer = require("nodemailer");
 
 const app = express();
 const admin = require("firebase-admin");
@@ -16,6 +16,15 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
+
+// ── Email transporter ─────────────────────────────────────────
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,      // e.g. michealcraft022@gmail.com
+    pass: process.env.EMAIL_APP_PASS,  // Gmail App Password (not login password)
+  },
+});
 
 app.use(cors());
 app.use(express.json());
@@ -135,7 +144,9 @@ async function recordDriverEarning({
 
   await db.runTransaction(async (txn) => {
     const snap = await txn.get(walletRef);
-    const prev = snap.exists ? snap.data() : { total_accumulated: 0, available_balance: 0 };
+    const prev = snap.exists
+      ? snap.data()
+      : { total_accumulated: 0, available_balance: 0 };
 
     const newAccumulated = (prev.total_accumulated || 0) + amount;
     const newBalance = (prev.available_balance || 0) + amount;
@@ -179,7 +190,6 @@ app.post("/paystack-webhook", async (req, res) => {
     if (event.event === "charge.success") {
       const reference = event.data.reference;
 
-      // Look up ride by reference
       const snapshot = await db
         .collection("ride_requests")
         .where("payment_reference", "==", reference)
@@ -197,12 +207,11 @@ app.post("/paystack-webhook", async (req, res) => {
 
       console.log("✅ Found ride:", rideDoc.id);
 
-      // Determine payment type from Firestore state
-      const type = rideData.cancel_payment_status === "pending" ? "cancel" : "ride";
+      const type =
+        rideData.cancel_payment_status === "pending" ? "cancel" : "ride";
 
       console.log("👉 Type:", type);
 
-      // Prevent duplicates
       if (type === "ride" && rideData.payment_status === "paid") {
         console.log("⚠️ Ride already paid, skipping...");
         return res.sendStatus(200);
@@ -213,12 +222,10 @@ app.post("/paystack-webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // Ride payment — mark paid then record in driver wallet
       if (type === "ride") {
         await rideRef.update({ payment_status: "paid" });
         console.log("✅ Ride payment updated");
 
-        // Record earning in driver's wallet
         const fare = rideData.fare || 0;
         await recordDriverEarning({
           driverUid: rideData.driver_id,
@@ -231,7 +238,6 @@ app.post("/paystack-webhook", async (req, res) => {
         });
       }
 
-      // Cancel payment — just mark paid, no driver earning
       if (type === "cancel") {
         await rideRef.update({
           cancel_payment_status: "paid",
@@ -247,6 +253,78 @@ app.post("/paystack-webhook", async (req, res) => {
   } catch (error) {
     console.error("Webhook error:", error.message || error);
     res.sendStatus(500);
+  }
+});
+
+/* =====================
+   SEND SOS EMAIL
+===================== */
+app.post("/send-sos-email", async (req, res) => {
+  const { alertId, userId, rideId, driverPlate, lat, lng, mapsLink } = req.body;
+
+  if (!alertId || !userId) {
+    return res.status(400).json({ error: "alertId and userId are required" });
+  }
+
+  try {
+    // Load emergency contacts from Firestore
+    const contactsSnap = await db
+      .collection("users")
+      .doc(userId)
+      .collection("emergency_contacts")
+      .get();
+
+    const contacts = contactsSnap.docs.map((d) => d.data());
+
+    const subject = "🚨 SOS Emergency Alert";
+
+    const buildBody = (recipientName) => {
+      const location = mapsLink
+        ? `View live location: ${mapsLink}`
+        : "Location unavailable";
+      const plateInfo = driverPlate ? `\nTricycle plate: ${driverPlate}` : "";
+      return (
+        `Hi ${recipientName},\n\n` +
+        `EMERGENCY: A passenger needs immediate help.${plateInfo}\n\n` +
+        `${location}\n\n` +
+        `Please call emergency services or check on them immediately.`
+      );
+    };
+
+    // All recipients: emergency contacts + support
+    const recipients = [
+      ...contacts
+        .filter((c) => c.email)
+        .map((c) => ({ name: c.name || "Contact", email: c.email })),
+      { name: "Support Team", email: "michealcraft022@gmail.com" },
+    ];
+
+    // Send all emails in parallel
+    await Promise.all(
+      recipients.map((r) =>
+        transporter.sendMail({
+          from: `"SafeRide SOS" <${process.env.EMAIL_USER}>`,
+          to: r.email,
+          subject,
+          text: buildBody(r.name),
+        })
+      )
+    );
+
+    // Update alert to record that emails were sent
+    await db.collection("sos_alerts").doc(alertId).update({
+      emails_sent: true,
+      emails_sent_at: admin.firestore.FieldValue.serverTimestamp(),
+      notified_count: recipients.length,
+    });
+
+    console.log(
+      `✅ SOS emails sent for alert ${alertId} to ${recipients.length} recipients`
+    );
+    res.json({ success: true, sent_to: recipients.length });
+  } catch (error) {
+    console.error("SOS email error:", error.message || error);
+    res.status(500).json({ error: "Failed to send SOS emails" });
   }
 });
 
