@@ -2,8 +2,6 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
-const Brevo = require("@getbrevo/brevo");
-
 const app = express();
 const admin = require("firebase-admin");
 
@@ -18,9 +16,25 @@ admin.initializeApp({
 const db = admin.firestore();
 
 // ── Brevo client (HTTP-based — works on Render free tier) ────
-const brevoClient = Brevo.ApiClient.instance;
-brevoClient.authentications["api-key"].apiKey = process.env.BREVO_API_KEY;
-const transactionalApi = new Brevo.TransactionalEmailsApi();
+async function sendBrevoEmail({ to, subject, textContent, htmlContent }) {
+  const response = await axios.post(
+    "https://api.brevo.com/v3/smtp/email",
+    {
+      sender: { name: "SafeRide SOS", email: "michealcraft022@gmail.com" },
+      to,
+      subject,
+      textContent,
+      htmlContent,
+    },
+    {
+      headers: {
+        "api-key": process.env.BREVO_API_KEY,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+  return response.data;
+}
 
 app.use(cors());
 app.use(express.json());
@@ -305,8 +319,7 @@ app.post("/send-sos-email", async (req, res) => {
     let sentCount = 0;
     for (const r of recipients) {
       try {
-        await transactionalApi.sendTransacEmail({
-          sender: { name: "SafeRide SOS", email: "michealcraft022@gmail.com" },
+        await sendBrevoEmail({
           to: [{ email: r.email, name: r.name }],
           subject,
           textContent: buildText(r.name),
