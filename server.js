@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
@@ -116,6 +115,59 @@ app.get("/verify-payment", async (req, res) => {
 });
 
 /* =====================
+   WALLET HELPER
+===================== */
+async function recordDriverEarning({
+  driverUid,
+  rideId,
+  amount,
+  rideType,
+  driverPlate,
+  pickupAddress,
+  destinationAddress,
+}) {
+  if (!driverUid) {
+    console.log("⚠️ No driverUid — skipping wallet record");
+    return;
+  }
+
+  const walletRef = db.collection("driver_wallets").doc(driverUid);
+
+  await db.runTransaction(async (txn) => {
+    const snap = await txn.get(walletRef);
+    const prev = snap.exists ? snap.data() : { total_accumulated: 0, available_balance: 0 };
+
+    const newAccumulated = (prev.total_accumulated || 0) + amount;
+    const newBalance = (prev.available_balance || 0) + amount;
+
+    txn.set(
+      walletRef,
+      {
+        total_accumulated: newAccumulated,
+        available_balance: newBalance,
+        last_updated: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    const txRef = walletRef.collection("transactions").doc();
+    txn.set(txRef, {
+      type: "credit",
+      amount,
+      label: "Trip Payment",
+      ride_id: rideId,
+      ride_type: rideType || "unknown",
+      driver_plate: driverPlate || null,
+      pickup_address: pickupAddress || null,
+      destination_address: destinationAddress || null,
+      created_at: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+
+  console.log(`✅ Wallet updated for driver ${driverUid}: +GHS ${amount}`);
+}
+
+/* =====================
    PAYSTACK WEBHOOK
 ===================== */
 app.post("/paystack-webhook", async (req, res) => {
@@ -127,7 +179,7 @@ app.post("/paystack-webhook", async (req, res) => {
     if (event.event === "charge.success") {
       const reference = event.data.reference;
 
-      // 🔥 Look up ride by reference instead of relying on metadata
+      // Look up ride by reference
       const snapshot = await db
         .collection("ride_requests")
         .where("payment_reference", "==", reference)
@@ -161,13 +213,25 @@ app.post("/paystack-webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // Ride payment
+      // Ride payment — mark paid then record in driver wallet
       if (type === "ride") {
         await rideRef.update({ payment_status: "paid" });
         console.log("✅ Ride payment updated");
+
+        // Record earning in driver's wallet
+        const fare = rideData.fare || 0;
+        await recordDriverEarning({
+          driverUid: rideData.driver_id,
+          rideId: rideDoc.id,
+          amount: fare,
+          rideType: rideData.ride_type,
+          driverPlate: rideData.driver_plate,
+          pickupAddress: rideData.pickup_address,
+          destinationAddress: rideData.destination_address,
+        });
       }
 
-      // Cancel payment
+      // Cancel payment — just mark paid, no driver earning
       if (type === "cancel") {
         await rideRef.update({
           cancel_payment_status: "paid",
