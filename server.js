@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
-const { Resend } = require("resend");
+const Brevo = require("@getbrevo/brevo");
 
 const app = express();
 const admin = require("firebase-admin");
@@ -17,8 +17,10 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// ── Resend client (HTTP-based — works on Render free tier) ────
-const resend = new Resend(process.env.RESEND_API_KEY);
+// ── Brevo client (HTTP-based — works on Render free tier) ────
+const brevoClient = Brevo.ApiClient.instance;
+brevoClient.authentications["api-key"].apiKey = process.env.BREVO_API_KEY;
+const transactionalApi = new Brevo.TransactionalEmailsApi();
 
 app.use(cors());
 app.use(express.json());
@@ -244,6 +246,7 @@ app.post("/send-sos-email", async (req, res) => {
 
   try {
     console.log("SOS userId received:", userId);
+
     // Load emergency contacts from Firestore
     const contactsSnap = await db
       .collection("users")
@@ -298,16 +301,16 @@ app.post("/send-sos-email", async (req, res) => {
       { name: "Support Team", email: "michealcraft022@gmail.com" },
     ];
 
-    // Send all emails, log individual failures without stopping others
+    // Send all emails via Brevo, log individual failures without stopping others
     let sentCount = 0;
     for (const r of recipients) {
       try {
-        await resend.emails.send({
-          from: "SafeRide SOS <onboarding@resend.dev>", // ← use resend.dev until you add a domain
-          to: r.email,
+        await transactionalApi.sendTransacEmail({
+          sender: { name: "SafeRide SOS", email: "michealcraft022@gmail.com" },
+          to: [{ email: r.email, name: r.name }],
           subject,
-          text: buildText(r.name),
-          html: buildHtml(r.name),
+          textContent: buildText(r.name),
+          htmlContent: buildHtml(r.name),
         });
         console.log(`📩 SOS email sent to: ${r.email}`);
         sentCount++;
@@ -348,7 +351,7 @@ app.get("/test-firestore", async (req, res) => {
 });
 
 console.log("PAYSTACK KEY LOADED:", !!process.env.PAYSTACK_SECRET);
-console.log("RESEND KEY LOADED:", !!process.env.RESEND_API_KEY);
+console.log("BREVO KEY LOADED:", !!process.env.BREVO_API_KEY);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
