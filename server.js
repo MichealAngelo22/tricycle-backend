@@ -21,8 +21,11 @@ const db = admin.firestore();
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: process.env.EMAIL_USER,      // e.g. michealcraft022@gmail.com
-    pass: process.env.EMAIL_APP_PASS,  // Gmail App Password (not login password)
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_APP_PASS,
+  },
+  tls: {
+    rejectUnauthorized: false,
   },
 });
 
@@ -300,16 +303,20 @@ app.post("/send-sos-email", async (req, res) => {
     ];
 
     // Send all emails in parallel
-    await Promise.all(
-      recipients.map((r) =>
-        transporter.sendMail({
-          from: `"SafeRide SOS" <${process.env.EMAIL_USER}>`,
-          to: r.email,
-          subject,
-          text: buildBody(r.name),
-        })
-      )
-    );
+    for (const r of recipients) {
+  try {
+    await transporter.sendMail({
+      from: `"SafeRide SOS" <${process.env.EMAIL_USER}>`,
+      to: r.email,
+      subject,
+      text: buildBody(r.name),
+    });
+
+    console.log(`📩 Email sent to: ${r.email}`);
+  } catch (err) {
+    console.log(`❌ Failed email: ${r.email}`, err.message);
+  }
+}
 
     // Update alert to record that emails were sent
     await db.collection("sos_alerts").doc(alertId).update({
