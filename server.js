@@ -161,7 +161,7 @@ async function recordDriverEarning({
       label: "Trip Payment",
       ride_id: rideId,
       ride_type: rideType || "unknown",
-      driver_plate: driverPlate || null,
+      car_plate: driverPlate || null,
       pickup_address: pickupAddress || null,
       destination_address: destinationAddress || null,
       created_at: admin.firestore.FieldValue.serverTimestamp(),
@@ -224,7 +224,7 @@ app.post("/paystack-webhook", async (req, res) => {
           rideId: rideDoc.id,
           amount: fare,
           rideType: rideData.ride_type,
-          driverPlate: rideData.driver_plate,
+          driverPlate: rideData.car_plate,
           pickupAddress: rideData.pickup_address,
           destinationAddress: rideData.destination_address,
         });
@@ -315,6 +315,8 @@ app.post("/send-sos-email", async (req, res) => {
       { name: "Support Team", email: "michealcraft022@gmail.com" },
     ];
 
+    console.log("Total recipients:", recipients.length, recipients.map(r => r.email));
+
     // Send all emails via Brevo, log individual failures without stopping others
     let sentCount = 0;
     for (const r of recipients) {
@@ -329,6 +331,10 @@ app.post("/send-sos-email", async (req, res) => {
         sentCount++;
       } catch (err) {
         console.error(`❌ Failed to send to ${r.email}:`, err.message);
+        if (err.response) {
+          console.error(`   Brevo status: ${err.response.status}`);
+          console.error(`   Brevo body:`, JSON.stringify(err.response.data));
+        }
       }
     }
 
@@ -346,6 +352,10 @@ app.post("/send-sos-email", async (req, res) => {
     res.json({ success: true, sent_to: sentCount, total: recipients.length });
   } catch (error) {
     console.error("SOS email error:", error.message || error);
+    if (error.response) {
+      console.error("Brevo status:", error.response.status);
+      console.error("Brevo body:", JSON.stringify(error.response.data));
+    }
     res.status(500).json({ error: "Failed to send SOS emails" });
   }
 });
@@ -360,6 +370,105 @@ app.get("/test-firestore", async (req, res) => {
   } catch (err) {
     console.error("Firestore test error:", err);
     res.status(500).send(err.message);
+  }
+});
+
+/* =====================
+   TEST EMAIL
+===================== */
+app.get("/test-email", async (req, res) => {
+  try {
+    const result = await sendBrevoEmail({
+      to: [{ email: "michealcraft022@gmail.com", name: "Test" }],
+      subject: "Test from server",
+      textContent: "If you see this, Brevo is working.",
+      htmlContent: "<p>If you see this, <b>Brevo is working.</b></p>",
+    });
+    console.log("Test email result:", JSON.stringify(result));
+    res.json({ success: true, result });
+  } catch (err) {
+    console.error("Test email error:", err.message);
+    if (err.response) {
+      console.error("Brevo status:", err.response.status);
+      console.error("Brevo body:", JSON.stringify(err.response.data));
+    }
+    res.status(500).json({
+      error: err.message,
+      brevo: err.response?.data ?? null,
+    });
+  }
+});
+
+app.post("/assign-delivery-man", async (req, res) => {
+  const { orderId } = req.body;
+  if (!orderId) return res.status(400).json({ error: "orderId required" });
+
+  try {
+    const orderRef = db.collection("delivery_orders").doc(orderId);
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists) return res.status(404).json({ error: "Order not found" });
+
+    const orderData = orderSnap.data();
+    const restaurantLat = orderData.restaurant_lat;
+    const restaurantLng = orderData.restaurant_lng;
+    const rejectedBy = orderData.rejected_by || [];
+
+    const deliveryMenSnap = await db
+      .collection("delivery_men")
+      .where("is_online", "==", true)
+      .get();
+
+    const available = deliveryMenSnap.docs.filter((doc) => {
+      const d = doc.data();
+      return (
+        !d.active_order_id &&
+        d.current_lat != null &&
+        d.current_lng != null &&
+        !rejectedBy.includes(doc.id)
+      );
+    });
+
+    if (available.length === 0) {
+      return res.json({ assigned: false, message: "No delivery men available" });
+    }
+
+    function haversineKm(lat1, lng1, lat2, lng2) {
+      const R = 6371;
+      const dLat = ((lat2 - lat1) * Math.PI) / 180;
+      const dLng = ((lng2 - lng1) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos((lat1 * Math.PI) / 180) *
+          Math.cos((lat2 * Math.PI) / 180) *
+          Math.sin(dLng / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    let nearest = null;
+    let minDist = Infinity;
+
+    for (const doc of available) {
+      const d = doc.data();
+      const dist = haversineKm(
+        restaurantLat, restaurantLng,
+        d.current_lat, d.current_lng
+      );
+      if (dist < minDist) {
+        minDist = dist;
+        nearest = { id: doc.id, dist };
+      }
+    }
+
+    await orderRef.update({
+      target_delivery_man_id: nearest.id,
+      target_distance_km: minDist,
+    });
+
+    console.log(`✅ Order ${orderId} assigned to ${nearest.id} (${minDist.toFixed(2)} km)`);
+    res.json({ assigned: true, delivery_man_id: nearest.id, distance_km: minDist });
+  } catch (error) {
+    console.error("Assign delivery man error:", error.message);
+    res.status(500).json({ error: "Assignment failed" });
   }
 });
 
