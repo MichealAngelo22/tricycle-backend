@@ -181,7 +181,55 @@ app.post("/paystack-webhook", async (req, res) => {
   try {
     if (event.event === "charge.success") {
       const reference = event.data.reference;
+      const metaType = event.data.metadata?.type;
+      const metaRideId = event.data.metadata?.rideId;
 
+      // ── DEPOSIT ────────────────────────────────────────────────
+      if (metaType === "deposit") {
+        const uid = metaRideId; // Flutter passes uid as rideId for deposits
+        const amount = event.data.amount / 100; // kobo → GHS
+
+        if (!uid) {
+          console.log("❌ Deposit webhook missing uid");
+          return res.sendStatus(200);
+        }
+
+        const userRef = db.collection("users").doc(uid);
+
+        // Idempotency: check if this reference was already processed
+        const existingTx = await db
+          .collection("users")
+          .doc(uid)
+          .collection("wallet_transactions")
+          .where("reference", "==", reference)
+          .limit(1)
+          .get();
+
+        if (!existingTx.empty) {
+          console.log("⚠️ Deposit already processed for reference:", reference);
+          return res.sendStatus(200);
+        }
+
+        await db.runTransaction(async (txn) => {
+          txn.update(userRef, {
+            wallet_balance: admin.firestore.FieldValue.increment(amount),
+            deposit_skipped: false,
+          });
+
+          const txRef = userRef.collection("wallet_transactions").doc();
+          txn.set(txRef, {
+            type: "deposit",
+            amount,
+            reference,
+            created_at: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+
+        console.log(`✅ Deposit of GHS ${amount} credited to user ${uid}`);
+        return res.sendStatus(200);
+      }
+
+      // ── RIDE / CANCEL PAYMENT ──────────────────────────────────
       const snapshot = await db
         .collection("ride_requests")
         .where("payment_reference", "==", reference)
@@ -249,6 +297,69 @@ app.post("/paystack-webhook", async (req, res) => {
 });
 
 /* =====================
+   DEDUCT WALLET
+   Called by Flutter when rider pays cancellation fee from wallet.
+   Uses Admin SDK so it bypasses Firestore security rules.
+===================== */
+app.post("/deduct-wallet", async (req, res) => {
+  const { uid, amount, rideId, type } = req.body;
+
+  if (!uid || !amount || !rideId) {
+    return res.status(400).json({ error: "uid, amount, and rideId are required" });
+  }
+
+  const userRef = db.collection("users").doc(uid);
+  const rideRef = db.collection("ride_requests").doc(rideId);
+
+  try {
+    let balanceAfter = 0;
+
+    await db.runTransaction(async (txn) => {
+      const userSnap = await txn.get(userRef);
+      const userData = userSnap.data();
+      const balance = (userData?.wallet_balance ?? 0);
+
+      if (balance < amount) {
+        throw new Error("INSUFFICIENT_BALANCE");
+      }
+
+      balanceAfter = balance - amount;
+
+      let riderName = `${userData?.firstName ?? ""} ${userData?.lastName ?? ""}`.trim();
+      if (!riderName) riderName = "Rider";
+
+      txn.update(userRef, {
+        wallet_balance: admin.firestore.FieldValue.increment(-amount),
+      });
+
+      txn.update(rideRef, {
+        cancel_payment_status: "paid",
+        status: "cancelled",
+        rider_cancelled_name: riderName,
+        cancel_payment_method: "wallet",
+      });
+
+      const txRef = userRef.collection("wallet_transactions").doc();
+      txn.set(txRef, {
+        type: type ?? "cancel_fee",
+        amount,
+        ride_id: rideId,
+        created_at: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    console.log(`✅ Deducted GHS ${amount} from user ${uid} for ride ${rideId}`);
+    res.json({ success: true, balance_after: balanceAfter });
+  } catch (error) {
+    if (error.message === "INSUFFICIENT_BALANCE") {
+      return res.status(402).json({ error: "INSUFFICIENT_BALANCE" });
+    }
+    console.error("Deduct wallet error:", error.message || error);
+    res.status(500).json({ error: "Deduction failed" });
+  }
+});
+
+/* =====================
    SEND SOS EMAIL
 ===================== */
 app.post("/send-sos-email", async (req, res) => {
@@ -261,7 +372,6 @@ app.post("/send-sos-email", async (req, res) => {
   try {
     console.log("SOS userId received:", userId);
 
-    // Load emergency contacts from Firestore
     const contactsSnap = await db
       .collection("users")
       .doc(userId)
@@ -307,7 +417,6 @@ app.post("/send-sos-email", async (req, res) => {
       `;
     };
 
-    // All recipients: emergency contacts + support
     const recipients = [
       ...contacts
         .filter((c) => c.email)
@@ -317,7 +426,6 @@ app.post("/send-sos-email", async (req, res) => {
 
     console.log("Total recipients:", recipients.length, recipients.map(r => r.email));
 
-    // Send all emails via Brevo, log individual failures without stopping others
     let sentCount = 0;
     for (const r of recipients) {
       try {
@@ -338,7 +446,6 @@ app.post("/send-sos-email", async (req, res) => {
       }
     }
 
-    // Update alert in Firestore
     await db.collection("sos_alerts").doc(alertId).set(
       {
         emails_sent: true,
@@ -399,6 +506,9 @@ app.get("/test-email", async (req, res) => {
   }
 });
 
+/* =====================
+   ASSIGN DELIVERY MAN
+===================== */
 app.post("/assign-delivery-man", async (req, res) => {
   const { orderId } = req.body;
   if (!orderId) return res.status(400).json({ error: "orderId required" });
